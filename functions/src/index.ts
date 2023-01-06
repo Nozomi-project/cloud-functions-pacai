@@ -16,7 +16,6 @@ functions.firestore
         return;
       }
 
-      // Get the project ID from the FIREBASE_CONFIG env var
       const project = JSON.parse(process.env.FIREBASE_CONFIG!).projectId;
       const location = "us-central1";
       const queue = "firestore-ttl";
@@ -39,7 +38,7 @@ functions.firestore
           },
         },
         scheduleTime: {
-          seconds: 120 + (Date.now() / 1000),
+          seconds: 300 + (Date.now() / 1000),
         },
       };
 
@@ -57,32 +56,47 @@ export const firestoreTtlCallback =
       await admin.firestore().doc(payload.docPath).update(
           {"status": "CAN", "expiration_task": null}
       );
-
-      const reservation = await admin.firestore().doc(payload.docPath).get();
-      const establishmentId = reservation.data()?.establishment_Id;
-      const reservationDetailsSnapshot = await admin.firestore()
-          .doc(payload.docPath)
-          .collection("reservation_Detail").get();
-
-      reservationDetailsSnapshot.forEach( async (productDoc) => {
-        const productDetail = productDoc.data();
-        const productId = productDetail.product_Id;
-
-        const productRef = admin.firestore()
-            .collection("establishment")
-            .doc(establishmentId)
-            .collection("product")
-            .doc(productId);
-
-        const productSnapshot = await productRef.get();
-        const product = productSnapshot.data();
-        const stock = productDetail.quantity + product?.stock;
-
-        await productRef.update({"stock": stock});
-      });
       res.send(200);
     } catch (error) {
       console.error(error);
       res.status(500).send(error);
     }
   });
+
+export const onUpdatePostCancelExpirationTask =
+functions.firestore
+    .document("reservation/{reservationId}")
+    .onUpdate(async (change) => {
+      const after = change.after.data();
+      const expirationTask = after.expiration_task;
+      const state = after.status;
+      if ((state == "DEL") || (state == "CAN")) {
+        if (state == "CAN") {
+          const establishmentId = after.establishment_Id;
+          const reservationDetailsSnapshot = await admin.firestore()
+              .doc("reservation/"+change.after.id)
+              .collection("reservation_Detail").get();
+
+          reservationDetailsSnapshot.forEach( async (productDoc) => {
+            const productDetail = productDoc.data();
+            const productId = productDetail.product_Id;
+
+            const productRef = admin.firestore()
+                .collection("establishment")
+                .doc(establishmentId)
+                .collection("product")
+                .doc(productId);
+
+            const productSnapshot = await productRef.get();
+            const product = productSnapshot.data();
+            const stock = productDetail.quantity + product?.stock;
+
+            await productRef.update({"stock": stock});
+          });
+        }
+        if (expirationTask) {
+          const taskClient = new CloudTasksClient();
+          await taskClient.deleteTask({name: expirationTask});
+        }
+      }
+    });
